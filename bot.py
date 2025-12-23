@@ -20,11 +20,21 @@ DB_URL = os.environ.get("DB_URL", "")
 DB_NAME = "Full_Featured_FileStore_Bot"
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))
 
-# ওনার ডিটেইলস (এগুলো রেন্ডারে ভ্যারিয়েবল হিসেবে দিবেন)
+# ওনার ডিটেইলস
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "YourTelegramUsername")
-OWNER_CHANNEL = os.environ.get("OWNER_CHANNEL", "https://t.me/YourChannelLink")
+OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "Telegram")
+OWNER_CHANNEL = os.environ.get("OWNER_CHANNEL", "https://t.me/Telegram")
 PORT = int(os.environ.get("PORT", 8080))
+
+# ইউআরএল ভ্যালিডেশন ফাংশন (এরর সমাধান করার জন্য)
+def fix_url(url_str):
+    if not url_str: return "https://t.me/telegram"
+    url_str = url_str.strip()
+    if url_str.startswith("http"):
+        return url_str
+    # ইউজারনেম হলে লিঙ্কে রূপান্তর
+    clean_name = url_str.replace("@", "")
+    return f"https://t.me/{clean_name}"
 
 # ================== ২. ডাটাবেস ও হেলথ চেক সার্ভার ==================
 db_client = AsyncIOMotorClient(DB_URL)
@@ -32,81 +42,66 @@ db = db_client[DB_NAME]
 clones_collection = db.clones
 files_collection = db.files
 
-# রেন্ডারের জন্য ফ্ল্যাস্ক সার্ভার
 app = Flask(__name__)
 @app.route('/')
 def home(): 
-    return "🔥 Bot is Online! Deploy Successful. 🔥"
+    return "🔥 Bot is Online! Fixed Version. 🔥"
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-# ইউজার স্টেট ট্র্যাকার
 user_states = {}
 
-# ================== ৩. শর্টনার ফাংশন (Universal API) ==================
+# ================== ৩. শর্টনার ফাংশন ==================
 async def get_shortlink(url, api, link):
     if not api or not url: 
         return link
-    # বেশিরভাগ শর্টনার সাইট এই ফরম্যাট সাপোর্ট করে
     endpoint = f"https://{url}/api?api={api}&url={link}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(endpoint, timeout=10) as resp:
                 res = await resp.json()
-                if "shortenedUrl" in res:
-                    return res["shortenedUrl"]
-                if "shortlink" in res:
-                    return res["shortlink"]
-                return link
+                return res.get("shortenedUrl") or res.get("shortlink") or link
     except Exception as e:
         print(f"Shortener Error: {e}")
         return link
 
-# ================== ৪. ক্লোন বটের ফুল ইঞ্জিন ==================
+# ================== ৪. ক্লোন বটের ইঞ্জিন ==================
 async def start_clone_bot(data):
     token = data['token']
     user_api = data.get('api', "")
     user_url = data.get('url', "")
-    user_up_channel = data.get('up_channel', OWNER_CHANNEL)
+    # চ্যানেল লিঙ্ক ফিক্স করা
+    user_up_channel = fix_url(data.get('up_channel', OWNER_CHANNEL))
 
     try:
         clone = Client(
             name=f"session_{token[:10]}",
             api_id=API_ID,
             api_hash=API_HASH,
-            bot_token=token,
-            plugins=None
+            bot_token=token
         )
 
-        #--- ক্লোন বটে ফাইল সেভ করা ---
         @clone.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
         async def handle_file_clone(c, m):
             try:
-                # স্টোরেজ চ্যানেলে ফাইল পাঠানো
                 fwd = await m.forward(CHANNEL_ID)
-                # ইউনিক আইডি জেনারেট
                 db_id = base64.urlsafe_b64encode(str(fwd.id).encode()).decode().rstrip("=")
-                # ডাটাবেসে সেভ
                 await files_collection.insert_one({"file_id": db_id, "msid": fwd.id})
                 
                 bot_me = await c.get_me()
                 raw_link = f"https://t.me/{bot_me.username}?start={db_id}"
-                
-                # শর্টনার প্রসেস
                 final_link = await get_shortlink(user_url, user_api, raw_link)
                 
                 await m.reply_text(
                     f"✅ **ফাইল সেভ হয়েছে!**\n\n🔗 **লিঙ্ক:** `{final_link}`",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("লিঙ্ক ওপেন করুন 🚀", url=final_link)],
-                        [InlineKeyboardButton("শেয়ার করুন 📤", url=f"https://telegram.me/share/url?url={final_link}")]
+                        [InlineKeyboardButton("লিঙ্ক ওপেন করুন 🚀", url=final_link)]
                     ])
                 )
             except Exception as e:
-                await m.reply_text(f"❌ Error: {e}")
+                print(f"Clone File Error: {e}")
 
-        #--- ক্লোন বট থেকে ফাইল ডেলিভারি ---
         @clone.on_message(filters.command("start") & filters.private)
         async def handle_start_clone(c, m):
             if len(m.command) > 1:
@@ -114,37 +109,36 @@ async def start_clone_bot(data):
                 file_data = await files_collection.find_one({"file_id": query})
                 
                 if file_data:
-                    # ১. ফাইল পাঠানো (অরিজিনাল ক্যাপশন ডিলিট করে)
-                    await c.copy_message(
-                        chat_id=m.chat.id,
-                        from_chat_id=CHANNEL_ID,
-                        message_id=file_data['msid'],
-                        caption="" # ফ্রেশ ফাইল
-                    )
+                    await c.copy_message(m.chat.id, CHANNEL_ID, file_data['msid'], caption="")
                     
-                    # ২. জয়েন মেসেজ ও কন্টাক্ট বাটন
+                    # বাটন লিঙ্ক ভ্যালিডেশন
+                    u_chan = fix_url(user_up_channel)
+                    u_owner = fix_url(OWNER_USERNAME)
+                    
                     btns = [
-                        [InlineKeyboardButton("বট আপডেট চ্যানেল 📢", url=user_up_channel)],
-                        [InlineKeyboardButton("ওনারের সাথে যোগাযোগ 👤", url=f"https://t.me/{OWNER_USERNAME}")]
+                        [InlineKeyboardButton("বট আপডেট চ্যানেল 📢", url=u_chan)],
+                        [InlineKeyboardButton("ওনারের সাথে যোগাযোগ 👤", url=u_owner)]
                     ]
                     await m.reply_text(
                         "✅ **আপনার ফাইলটি উপরে পাঠানো হয়েছে।**\n\nসবাই আমাদের বট আপডেট চ্যানেলে জয়েন দিয়ে পাশে থাকুন।",
                         reply_markup=InlineKeyboardMarkup(btns)
                     )
                     return
-            
-            await m.reply_text(f"👋 **হ্যালো!**\nআমি একটি ফাইল স্টোর বট। আমাকে যেকোনো ফাইল পাঠান, আমি আপনাকে লিঙ্ক দেব।")
+            await m.reply_text(f"👋 **হ্যালো!**\nআমি একটি ফাইল স্টোর বট। ফাইল পাঠান লিঙ্ক পাওয়ার জন্য।")
 
         await clone.start()
-        print(f"Clone Bot Started: {token[:10]}")
     except Exception as e:
-        print(f"Failed to start clone {token[:10]}: {e}")
+        print(f"Clone {token[:5]} failed: {e}")
 
-# ================== ৫. মাস্টার বট লজিক (বাটন ও সেটিংস) ==================
+# ================== ৫. মাস্টার বট লজিক ==================
 master = Client("MasterBot", api_id=API_ID, api_hash=API_HASH, bot_token=MASTER_TOKEN)
 
 @master.on_message(filters.command("start") & filters.private)
 async def handle_master_start(c, m):
+    # ইউআরএল ফিক্স করা এরর এড়াতে
+    chan_url = fix_url(OWNER_CHANNEL)
+    owner_url = fix_url(OWNER_USERNAME)
+    
     welcome_text = (
         "👋 **ফাইল স্টোর ক্লোনার বটে স্বাগতম!**\n\n"
         "এখানে আপনি নিজের টোকেন দিয়ে একদম ফ্রিতে একটি ফাইল স্টোর বট বানাতে পারবেন।"
@@ -152,25 +146,23 @@ async def handle_master_start(c, m):
     btns = [
         [InlineKeyboardButton("➕ নিজের বট তৈরি করুন", callback_data="create_bot")],
         [InlineKeyboardButton("⚙️ আপডেট চ্যানেল সেট করুন", callback_data="setup_channel")],
-        [InlineKeyboardButton("📢 ওনার চ্যানেল", url=OWNER_CHANNEL)],
-        [InlineKeyboardButton("👤 ওনার কন্টাক্ট", url=f"https://t.me/{OWNER_USERNAME}")]
+        [InlineKeyboardButton("📢 ওনার চ্যানেল", url=chan_url)],
+        [InlineKeyboardButton("👤 ওনার কন্টাক্ট", url=owner_url)]
     ]
     await m.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(btns))
 
 @master.on_callback_query()
 async def master_callback(c, q: CallbackQuery):
     u_id = q.from_user.id
-    
     if q.data == "create_bot":
         user_states[u_id] = {"step": "token"}
-        await q.message.edit_text("🤖 **ধাপ ১:**\nআপনার বটের **Bot Token** টি পাঠান।\n(টোকেন পেতে @BotFather ব্যবহার করুন)")
-    
+        await q.message.edit_text("🤖 **ধাপ ১:**\nআপনার বটের **Bot Token** টি পাঠান।")
     elif q.data == "setup_channel":
         check = await clones_collection.find_one({"user_id": u_id})
         if not check:
             return await q.answer("আগে একটি বট ক্লোন করুন!", show_alert=True)
         user_states[u_id] = {"step": "up_link"}
-        await q.message.edit_text("🔗 ফাইলের নিচে কোন চ্যানেল লিঙ্ক দেখাতে চান? সেই লিঙ্কটি পাঠান।\n(উদা: https://t.me/MyChannel)")
+        await q.message.edit_text("🔗 আপনার আপডেট চ্যানেল লিঙ্কটি পাঠান।")
 
 @master.on_message(filters.private & filters.text & ~filters.command("start"))
 async def master_inputs(c, m):
@@ -178,55 +170,31 @@ async def master_inputs(c, m):
     if u_id not in user_states: return
     
     state = user_states[u_id]
-    step = state["step"]
-
-    if step == "token":
-        state["token"] = m.text
-        state["step"] = "api"
-        await m.reply_text("🔑 **ধাপ ২:**\nআপনার শর্টনার সাইটের (Gplinks/Droplink) **API Key** পাঠান।")
-    
-    elif step == "api":
-        state["api"] = m.text
-        state["step"] = "url"
-        await m.reply_text("🌐 **ধাপ ৩:**\nশর্টনার সাইটের **Domain** পাঠান (উদা: gplinks.in)।")
-    
-    elif step == "url":
-        state["url"] = m.text
-        state["user_id"] = u_id
-        state["up_channel"] = OWNER_CHANNEL
-        
-        # ডাটাবেসে তথ্য রাখা
+    if state["step"] == "token":
+        state.update({"token": m.text, "step": "api"})
+        await m.reply_text("🔑 **ধাপ ২:**\nআপনার শর্টনার **API Key** পাঠান।")
+    elif state["step"] == "api":
+        state.update({"api": m.text, "step": "url"})
+        await m.reply_text("🌐 **ধাপ ৩:**\nশর্টনার **Domain** পাঠান (উদা: gplinks.in)।")
+    elif state["step"] == "url":
+        state.update({"url": m.text, "user_id": u_id, "up_channel": OWNER_CHANNEL})
         await clones_collection.update_one({"user_id": u_id}, {"$set": state}, upsert=True)
-        
-        # ক্লোন চালু করা
         asyncio.create_task(start_clone_bot(state))
-        
         del user_states[u_id]
-        await m.reply_text("✅ **সফল হয়েছে!** আপনার বটটি এখন সচল। আপনার বটের ইউজারনেমে গিয়ে স্টার্ট দিন।")
-
-    elif step == "up_link":
-        new_link = m.text
-        await clones_collection.update_one({"user_id": u_id}, {"$set": {"up_channel": new_link}})
+        await m.reply_text("✅ **সফল হয়েছে!** আপনার বটের ইউজারনেমে গিয়ে স্টার্ট দিন।")
+    elif state["step"] == "up_link":
+        await clones_collection.update_one({"user_id": u_id}, {"$set": {"up_channel": m.text}})
         del user_states[u_id]
         await m.reply_text("✅ **সফল!** আপডেট চ্যানেল লিঙ্ক পরিবর্তন করা হয়েছে।")
 
-# সার্ভার রিস্টার্ট দিলে সব ক্লোন রিস্টার্ট করার লজিক
 async def boot_all_clones():
     async for clone_data in clones_collection.find({}):
         asyncio.create_task(start_clone_bot(clone_data))
 
-# ================== ৬. মেইন রানার (Startup) ==================
 if __name__ == "__main__":
-    # ১. ফ্ল্যাস্ক হেলথ চেক থ্রেড
     Thread(target=run_flask).start()
-    
-    # ২. মাস্টার বট স্টার্ট
     master.start()
-    print(">>> Master Bot is Live! <<<")
-    
-    # ৩. ডাটাবেস থেকে ক্লোনগুলো স্টার্ট করা
     loop = asyncio.get_event_loop()
     loop.create_task(boot_all_clones())
-    
-    # ৪. লুপ চালু রাখা
+    print(">>> Master Bot & Clones are Live! <<<")
     asyncio.get_event_loop().run_forever()
